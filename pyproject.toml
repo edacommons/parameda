@@ -1,0 +1,45 @@
+[build-system]
+requires = ["scikit-build-core>=0.8", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "parameda"
+version = "0.1.0"
+description = "Param + EDA — a hierarchical configuration system for EDA tooling."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Serge Rabykin" }]
+requires-python = ">=3.10"
+keywords = ["eda", "configuration", "config", "vlsi", "chip-design", "parameters"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/edacommons/parameda"
+Source   = "https://github.com/edacommons/parameda"
+Issues   = "https://github.com/edacommons/parameda/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.scikit-build]
+minimum-version = "0.8"
+cmake.version = ">=3.20"
+cmake.build-type = "Release"
+wheel.packages = ["python/parameda"]
+
+[tool.scikit-build.cmake.define]
+PARAMEDA_BUILD_TESTS = "OFF"
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
