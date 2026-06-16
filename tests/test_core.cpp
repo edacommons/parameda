@@ -85,11 +85,17 @@ TEST_CASE("escaped dollar is literal") {
     CHECK(as_s(g(c, "e")) == "price: ${5}");
 }
 
-TEST_CASE("circular reference is detected") {
+TEST_CASE("self-reference resolves to the shadowed outer value") {
+    Context outer = Context::root().set("path", make_string("/base"));
+    Context inner = outer.set("path", make_string("${path}:/extra"));
+    CHECK(as_s(g(inner, "path")) == "/base:/extra"); // ${path} = inherited value
+}
+
+TEST_CASE("unresolvable cycle (no shadowed escape) is undefined") {
     Context c = Context::root()
                     .set("a", make_string("${b}"))
                     .set("b", make_string("${a}"));
-    CHECK_THROWS(g(c, "a"));
+    CHECK_THROWS(g(c, "a")); // both skipped while active, nothing left to match
 }
 
 TEST_CASE("link + dotted descend reaches another branch") {

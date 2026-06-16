@@ -280,8 +280,13 @@ eval(AST, view):
 **Cycle guards** (resolution must stay finite):
 
 - `Merge` targets — visited-set in `gen` (§2).
-- Expression / `Ref` reference cycles — visited-set keyed on the record being
-  resolved during an `eval`.
+- Expression reference cycles — the resolver tracks the records currently being
+  evaluated (`active`) and **skips them as lookup candidates**. A placeholder
+  that would resolve to the binding currently being computed instead walks past
+  it to the next (shadowed) match. This makes `x = "${x}-extra"` resolve to the
+  *inherited* value of `x` — a `super`-style reference (e.g. `PATH = "${PATH}:/x"`).
+  A reference with no such escape falls off the chain and is reported undefined;
+  there is no distinct "circular reference" error.
 - **Key resolution** — because matching a candidate now evaluates its key (which
   triggers lookups), key resolution carries the same visited-set protection and a
   bound on match-recursion depth. The literal fast-path keeps the common case off

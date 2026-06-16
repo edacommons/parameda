@@ -54,6 +54,12 @@ def test_link_and_dotted_path():
     assert not rp.has("a")  # bare key is down the other branch
 
 
+def test_self_reference_uses_shadowed_value():
+    outer = parameda.root().set("path", "/base")
+    inner = outer.set("path", "${path}:/extra")
+    assert inner.get("path") == "/base:/extra"
+
+
 def test_merge_order():
     defaults = parameda.root().set("opt", "D")
     base = parameda.root().set("opt", "B")

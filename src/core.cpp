@@ -81,13 +81,17 @@ bool Context::key_matches(const Record& r, const std::string& key) const {
 
 RecordPtr Context::lookup(const std::string& key) const {
     std::set<const Record*> merge_visited;
-    return lookup_in(rec_, key, merge_visited);
+    std::set<const Record*> active; // empty: a plain lookup skips nothing
+    return lookup_in(rec_, key, merge_visited, active);
 }
 
 // Walk the upward stream (§2). A merge record splices its target's stream in,
-// before or after the rest of the upward chain per its order flag.
+// before or after the rest of the upward chain per its order flag. Records in
+// `active` (currently being evaluated) are skipped as candidates, so a
+// placeholder resolving mid-evaluation falls through to the next match (§5).
 RecordPtr Context::lookup_in(const RecordPtr& start, const std::string& key,
-                             std::set<const Record*>& mv) const {
+                             std::set<const Record*>& mv,
+                             const std::set<const Record*>& active) const {
     RecordPtr R = start;
     while (R) {
         if (const MergeVal* m = std::get_if<MergeVal>(&R->value)) {
@@ -95,7 +99,7 @@ RecordPtr Context::lookup_in(const RecordPtr& start, const std::string& key,
             if (m->order == MergeOrder::MergeFirst) {
                 if (tp && !mv.count(tp)) {
                     mv.insert(tp);
-                    RecordPtr r = lookup_in(m->target, key, mv);
+                    RecordPtr r = lookup_in(m->target, key, mv, active);
                     mv.erase(tp);
                     if (r) return r;
                 }
@@ -103,16 +107,16 @@ RecordPtr Context::lookup_in(const RecordPtr& start, const std::string& key,
                 continue;
             }
             // WalkUpFirst: exhaust the rest of the upward chain, then the target.
-            if (RecordPtr r = lookup_in(R->parent, key, mv)) return r;
+            if (RecordPtr r = lookup_in(R->parent, key, mv, active)) return r;
             if (tp && !mv.count(tp)) {
                 mv.insert(tp);
-                RecordPtr r = lookup_in(m->target, key, mv);
+                RecordPtr r = lookup_in(m->target, key, mv, active);
                 mv.erase(tp);
                 if (r) return r;
             }
             return nullptr;
         }
-        if (R->has_key && key_matches(*R, key)) return R;
+        if (R->has_key && !active.count(R.get()) && key_matches(*R, key)) return R;
         R = R->parent;
     }
     return nullptr;
@@ -143,15 +147,19 @@ rawast::ValuePtr Context::eval_value(const rawast::ValuePtr& v,
 
 rawast::ValuePtr Context::resolve_ref(const std::string& key,
                                       std::set<const Record*>& active) const {
-    RecordPtr w = lookup(key); // resolved from this view (§5)
+    // Resolve from this view (§5), skipping records already being evaluated:
+    // a placeholder that would resolve to the binding currently being computed
+    // instead walks past it to the next (shadowed) match, so
+    // `x = "${x}-extra"` picks up the inherited value of x. A reference with no
+    // such escape falls off the chain and is reported undefined.
+    std::set<const Record*> merge_visited;
+    RecordPtr w = lookup_in(rec_, key, merge_visited, active);
     if (!w || std::holds_alternative<DeletedVal>(w->value))
         throw std::runtime_error("parameda: undefined variable '${" + key + "}'");
     if (std::holds_alternative<RefVal>(w->value))
         throw std::runtime_error("parameda: cannot interpolate a link '${" + key +
                                  "}'");
     const Record* wp = w.get();
-    if (active.count(wp))
-        throw std::runtime_error("parameda: circular reference at '${" + key + "}'");
     active.insert(wp);
     rawast::ValuePtr r = eval_value(std::get<DataVal>(w->value).value, active);
     active.erase(wp);
