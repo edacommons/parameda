@@ -211,7 +211,8 @@ designed so rung 2 slots in without rework.
 - **Rung 1 (v1): pure interpolation.**
   - `${path}` — variable/path lookup, resolved against the view stream (§5).
   - `$ENV{VAR}` — environment variable.
-  - `$JSON{path}` — load a JSON file (semantics finalized when implemented).
+  - `$JSON{path}` — load a JSON file as a lazily-loaded, cached **sub-folder**
+    (a sub-context), NOT inlined text (see §11).
   - Escaping for a literal `$` (`\$` or `$$` — **OPEN**, pick one).
 - **Rung 2 (later): a small fixed function set.** Tcl-style `[fn arg …]` (or a
   simpler `$(…)` — **OPEN**) with built-ins for path join, string concat/format,
@@ -230,8 +231,8 @@ text. This keeps string modeling simple without stringifying refs.
 
 ### 4.4 Keys as ASTs
 
-A key is resolved by the same evaluator as a value, with two constraints that
-keep lookup well-defined and affordable:
+A key is resolved by the same evaluator as a value, with these rules that keep
+lookup well-defined and affordable:
 
 - **Resolved from the querying view.** A record's key resolves against the view
   the lookup started from — *not* the record's authored position — consistent
@@ -243,6 +244,8 @@ keep lookup well-defined and affordable:
   **(DECIDED — flip candidate.)**
 - **Literal fast-path.** A pure-literal key AST is treated as a static string with
   no evaluation, so the common lookup stays cheap (§2).
+- **Computed / indirect names.** A placeholder body may itself be an expression,
+  so `${${x}}` evaluates the inner expression to produce the name (see §11).
 
 Two records "have the same key" iff their keys resolve to the same string from
 the querying view; shadowing and tombstones are defined in those terms (§2).
@@ -436,8 +439,47 @@ FetchContent_MakeAvailable(rawast)
 
 ## 10. Superseded material
 
-The first-pass `include/parameda/cfg.hpp` / `src/cfg.cpp` sketch committed earlier
-this session predates this design. It is **mutable**, uses **definitional** (not
-view-anchored) scoping, and has none of the record/value model above. It is to be
-**replaced**, not extended.
+A first-pass `include/parameda/cfg.hpp` / `src/cfg.cpp` sketch predated this
+design (mutable, **definitional** rather than view-anchored scoping, no
+record/value model). It has been **removed**; Milestone 1 (`core.hpp`/`core.cpp`)
+implements this spec instead.
+
+---
+
+## 11. Reference-implementation notes (ChipFlow `cfg.py`)
+
+The private ChipFlow `cfg.py` is an earlier, **mutable** implementation of the
+same underlying idea. It is not a blueprint — Parameda's graph is persistent and
+rawast-backed, where `cfg.py` edits folder dicts in place — but several of its
+mechanisms validate or inform decisions here.
+
+Confirms what Milestone 1 already does:
+
+- **Shadow-skip ≡ our `active` set (§5).** `cfg.py` carries a per-evaluation
+  `stack` mapping name→folder; when `${name}` re-enters while `name` is being
+  resolved, it restarts the walk from `stack[name].parent` — skipping the binding
+  under computation and taking the next one up. That is exactly our
+  skip-and-continue, keyed by name→folder there vs. record identity here.
+  Equivalent for a shadow chain; record identity is finer-grained for computed
+  keys, so we keep it. (Their `stack` is transient eval state; our `active` plays
+  the same role over an immutable graph.)
+- **Passthrough ≡ single-part expression (§4.3).** Its expression object returns
+  a single part un-stringified and joins multiple parts as text — identical to
+  our whole-string-`${x}` passthrough vs. embedded coercion.
+
+Mechanisms to ADOPT at the grammar milestone (§4.1):
+
+1. **Computed / indirect names.** `cfg.py` recursively parses the text *inside* a
+   placeholder, so `${${x}}` evaluates the inner expression to produce the name.
+   This is the concrete realization of "keys are ASTs" (§4.4): the grammar should
+   let a placeholder body be a full expression.
+2. **`$JSON{path}` yields a folder, not text.** It loads the file as a
+   lazily-evaluated, **cached** sub-folder (sub-context). Implement `$JSON` as a
+   `Ref`-like sub-context with memoization — not the inlined-text behavior of the
+   throwaway early scaffold.
+3. **`check` vs `evaluate` split + memoization.** A resolvability pass (is every
+   referenced name defined? does the env var / file exist?) distinct from
+   evaluation, plus per-node memoization of evaluated expressions. Maps to a
+   richer `has`/`check` than Milestone 1's `has`, and a caching layer once
+   evaluation is non-trivial.
 ```
