@@ -188,8 +188,8 @@ gives:
   an int or a string?" is answered by *what the AST node is*, not by a parameda
   rule.
 - **Expressions as ASTs, not string rescans** — a template is parsed into an AST
-  once; evaluation interprets that AST against the view (§5). `${path}`,
-  `$ENV{…}`, `[fn …]` are node types, not regex passes.
+  once; evaluation interprets that AST against the view (§5). `${…}`, `$ENV{…}`,
+  `$JSON{…}`, and any `$fn{…}` are all the same node type (§4.2), not regex passes.
 - **Computed keys** — a key may itself be an expression (§4.4), the natural dual
   of dynamic values.
 - **Bidirectional serialization** — rawast saves AST → text, so persisting and
@@ -203,23 +203,64 @@ key/value/expression language — *not* a reuse of the Tcl grammar. Reasons: the
 surface is exactly what parameda needs, and it is bidirectional for free. (Tcl
 and other rawast grammars remain available as *ingest* formats.)
 
-### 4.2 Expression language — staged
+### 4.2 Expression language — one form, two behaviors
 
-The language is built in rungs; v1 ships rung 1, with the value/eval path
-designed so rung 2 slots in without rework.
+There is a **single placeholder production**:
 
-- **Rung 1 (v1): pure interpolation.**
-  - `${path}` — variable/path lookup, resolved against the view stream (§5).
-  - `$ENV{VAR}` — environment variable.
-  - `$JSON{path}` — load a JSON file as a lazily-loaded, cached **sub-folder**
-    (a sub-context), NOT inlined text (see §11).
-  - Escaping for a literal `$` (`\$` or `$$` — **OPEN**, pick one).
-- **Rung 2 (later): a small fixed function set.** Tcl-style `[fn arg …]` (or a
-  simpler `$(…)` — **OPEN**) with built-ins for path join, string concat/format,
-  arithmetic, and a conditional. Covers real config needs (build paths, per-stage
-  switches) without being a programming language.
-- **Rung 3 (only if forced): full Tcl-like** commands / control flow / user procs.
-  Not committed; it means owning an interpreter and its safety surface.
+```
+$name{ arg, arg, … }
+```
+
+`name` is an optional identifier; the braces hold a comma-separated list of
+**argument expressions**, each recursively parsed (so `${${x}}` and
+`$ENV{${prefix}_HOME}` work — see §4.4). It parses to one AST node,
+`Action(name, args)`. Evaluation splits on whether `name` is empty:
+
+- **Empty name → built-in substitution.** `${expr}` is core engine behavior: it
+  resolves `expr` to a key and looks it up from the view, applying
+  skip-and-continue (§5) and passthrough (§4.3). Hard-wired in C++ — substitution
+  has to understand the record graph, the view, and shadowing, so it is *not* a
+  registered callback.
+
+- **Named → a registered callback.** `$fn{args}` looks `fn` up in a **function
+  registry** and calls it. Functions don't understand the graph; they receive
+  evaluated arguments and return a value. `ENV` and `JSON` are just preregistered
+  built-ins, and user functions register the same way. This is the language's
+  extension surface; the engine core stays minimal.
+
+**Callback contract:**
+
+- **Signature:** `callback(args: [Value], ctx) -> Value`. Most functions touch
+  only `args`; `ctx` is a handle back into the engine/view for functions that
+  need it (notably `JSON`, which builds a sub-context).
+- **Eager arguments.** Args are evaluated from the view *before* the callback is
+  called. (A future special-form door — a callback opting into raw, unevaluated
+  arg ASTs — is what a lazy `$if{cond, then, else}` would need; deferred, see §9.)
+- **Return is the full value union** (§3): a callback may return data *or* a
+  `Ref`/sub-context. `JSON` returns a sub-context, not a scalar.
+- **Registration from C++ and Python.** A Python callable can be registered as a
+  config function (values cross the same rawast⇄Python boundary as everywhere
+  else) — `cfg.register("slug", fn)` — making the language user-extensible without
+  touching the grammar or the core.
+- **Unknown `name`** → an error at evaluation (and flagged by the future `check`
+  pass, §11).
+
+**Built-ins** (shipped, registered through the same callback API):
+
+- `$ENV{VAR}` — environment variable (effectful; reads the host env).
+- `$JSON{path}` — load a JSON file as a lazily-loaded, **cached** sub-folder /
+  sub-context (effectful; needs `ctx`; memoized — see §11). NOT inlined text.
+
+Functions are tagged **pure** vs **effectful** so the `check` pass and the
+memoization layer know what is safe to cache (§11).
+
+**Escaping:** `\$` (or `$$` — **OPEN**, pick one) emits a literal `$`.
+
+**Staging.** v1 ships built-in substitution plus the `ENV`/`JSON` built-ins and
+the registry mechanism. A small standard function set (path join, string
+concat/format, arithmetic, conditional) lands as registered callbacks afterward —
+no grammar change required, which is the point of the unified form. A lazy
+special-form (`if`) is deferred until the raw-args door is opened.
 
 ### 4.3 Typing model: EIAS-lite with passthrough
 
@@ -324,6 +365,8 @@ ctx.has(key)                    -> bool          # resolves without raising
 ctx.raw(key)                    -> AST | None    # winning record's unevaluated value
 
 ctx.parent()                    -> ctx | None
+
+register(name, callback)                         # register a $name{…} function (§4.2)
 ```
 
 - **`set` takes a single key only.** Dotted-path convenience (`"build.pass1.log"`)
@@ -425,7 +468,10 @@ FetchContent_MakeAvailable(rawast)
 ## 9. Open questions (consolidated)
 
 1. Expression escaping: `\$` vs `$$` for a literal `$`.
-2. Rung-2 command syntax: Tcl-style `[fn …]` vs `$(…)`.
+2. Function calls: lazy/special-form support (raw, unevaluated arg ASTs) for a
+   `$if{…}`-style conditional — when to open that door (§4.2). Also: may user
+   functions **override** a built-in name (`ENV`/`JSON`), or are built-ins
+   reserved?
 3. `get`/`has` error/return conventions for undefined and for `Ref` results.
 4. On-disk serialization format for the record graph (keys/values already covered
    by rawast). Flat `(parent, key, value)` rows are the leading candidate.
