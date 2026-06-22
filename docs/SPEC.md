@@ -457,7 +457,7 @@ Notes:
 ```cmake
 FetchContent_Declare(rawast
     GIT_REPOSITORY https://github.com/edacommons/rawast.git
-    GIT_TAG v0.1.8           # pinned
+    GIT_TAG v0.1.9           # pinned
     GIT_SHALLOW ON)
 FetchContent_MakeAvailable(rawast)
 # target_link_libraries(parameda PUBLIC rawast::rawast)
