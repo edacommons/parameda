@@ -106,7 +106,7 @@ TEST_CASE("link + dotted descend reaches another branch") {
     RecordPtr w = rp.lookup("pdk");
     REQUIRE(w);
     REQUIRE(std::holds_alternative<RefVal>(w->value));
-    Context target(std::get<RefVal>(w->value).target);
+    Context target = rp.sub(std::get<RefVal>(w->value).target);
     CHECK(as_i(g(target, "a")) == 1);
     CHECK(as_i(g(target, "b")) == 2);
 
@@ -130,4 +130,43 @@ TEST_CASE("merge pulls in keys absent from the base") {
     Context m = base.merge(defaults, MergeOrder::MergeFirst);
     CHECK(as_i(g(m, "extra")) == 7); // from the merge target
     CHECK(as_i(g(m, "own")) == 1);   // from the base chain
+}
+
+TEST_CASE("ENV built-in function") {
+    ::setenv("PARAMEDA_FN_ENV", "abc", 1);
+    Context c = Context::root().set("e", make_string("$ENV{PARAMEDA_FN_ENV}"));
+    CHECK(as_s(g(c, "e")) == "abc");
+}
+
+TEST_CASE("registered function with multiple args") {
+    Context root = Context::root();
+    root.register_fn("join", [](const std::vector<rawast::ValuePtr>& args,
+                                const Context&) -> rawast::ValuePtr {
+        std::string out;
+        for (std::size_t i = 0; i < args.size(); ++i) {
+            if (i) out += "/";
+            out += std::static_pointer_cast<rawast::StringValue>(args[i])->data();
+        }
+        return rawast::make_string(out);
+    });
+    Context c = root.set("a", make_string("x")).set("p", make_string("$join{${a}, y, z}"));
+    CHECK(as_s(g(c, "p")) == "x/y/z");
+}
+
+TEST_CASE("unknown function errors") {
+    Context c = Context::root().set("v", make_string("$nope{x}"));
+    CHECK_THROWS(g(c, "v"));
+}
+
+TEST_CASE("computed / indirect name") {
+    Context c = Context::root()
+                    .set("which", make_string("target"))
+                    .set("target", make_int(99))
+                    .set("v", make_string("${${which}}"));
+    CHECK(as_i(g(c, "v")) == 99);
+}
+
+TEST_CASE("escaped dollar and brace are literal") {
+    Context c = Context::root().set("v", make_string("\\${x} and \\}"));
+    CHECK(as_s(g(c, "v")) == "${x} and }");
 }

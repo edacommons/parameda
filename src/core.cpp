@@ -4,12 +4,14 @@
 #include <stdexcept>
 #include <string>
 
+#include <parameda/expr.hpp>
+
 namespace parameda {
 
 namespace {
 
 // Render a rawast scalar as text for embedding in a larger string (§4.3).
-// Arrays/dicts cannot be interpolated into a string in rung 1.
+// Arrays/dicts cannot be interpolated into a string.
 std::string stringify(const rawast::ValuePtr& v) {
     using namespace rawast;
     if (!v) return "";
@@ -32,47 +34,79 @@ std::string stringify(const rawast::ValuePtr& v) {
     }
 }
 
+std::string trim(const std::string& s) {
+    std::size_t a = s.find_first_not_of(" \t\n\r");
+    if (a == std::string::npos) return "";
+    std::size_t b = s.find_last_not_of(" \t\n\r");
+    return s.substr(a, b - a + 1);
+}
+
+// Install the preregistered built-in functions on a fresh registry.
+void install_builtins(Registry& reg) {
+    // $ENV{VAR} — environment variable (empty if unset).
+    reg.fns["ENV"] = [](const std::vector<rawast::ValuePtr>& args,
+                        const Context&) -> rawast::ValuePtr {
+        if (args.size() != 1)
+            throw std::runtime_error("parameda: $ENV{} takes one argument");
+        const char* e = std::getenv(trim(stringify(args[0])).c_str());
+        return rawast::make_string(e ? std::string(e) : std::string());
+    };
+    // NOTE: $JSON{} (load a JSON file as a cached sub-folder) is deferred — it
+    // returns a sub-context, which needs the callback signature widened to the
+    // value union. Tracked for a follow-up (SPEC §4.2 / §11).
+}
+
 } // namespace
 
 // --- builders -----------------------------------------------------------
 
 Context Context::root() {
+    auto reg = std::make_shared<Registry>();
+    install_builtins(*reg);
     return Context(std::make_shared<Record>(
-        Record{nullptr, false, std::string{}, DataVal{rawast::null_value()}}));
+                       Record{nullptr, false, std::string{},
+                              DataVal{rawast::null_value()}}),
+                   std::move(reg));
 }
 
 Context Context::set(std::string key, rawast::ValuePtr value) const {
-    return Context(std::make_shared<Record>(
+    return sub(std::make_shared<Record>(
         Record{rec_, true, std::move(key), DataVal{std::move(value)}}));
 }
 
 Context Context::del(std::string key) const {
-    return Context(std::make_shared<Record>(
+    return sub(std::make_shared<Record>(
         Record{rec_, true, std::move(key), DeletedVal{}}));
 }
 
 Context Context::link(std::string key, const Context& target) const {
-    return Context(std::make_shared<Record>(
+    return sub(std::make_shared<Record>(
         Record{rec_, true, std::move(key), RefVal{target.rec_}}));
 }
 
 Context Context::merge(const Context& target, MergeOrder order) const {
-    return Context(std::make_shared<Record>(
+    return sub(std::make_shared<Record>(
         Record{rec_, false, std::string{}, MergeVal{target.rec_, order}}));
 }
 
+void Context::register_fn(std::string name, Callback cb) const {
+    reg_->fns[std::move(name)] = std::move(cb);
+}
+
 std::optional<Context> Context::parent() const {
-    if (rec_ && rec_->parent) return Context(rec_->parent);
+    if (rec_ && rec_->parent) return sub(rec_->parent);
     return std::nullopt;
 }
 
 // --- resolution ---------------------------------------------------------
 
 std::string Context::resolve_key(const Record& r) const {
-    // Literal fast-path (§2/§4.4): no '$' means the key needs no evaluation.
-    if (r.key.find('$') == std::string::npos) return r.key;
+    // Literal fast-path (§2/§4.4): no `$`/`\` means the key needs no parsing.
+    if (r.key.find('$') == std::string::npos &&
+        r.key.find('\\') == std::string::npos)
+        return r.key;
     std::set<const Record*> active;
-    return stringify(interpolate(r.key, active));
+    return stringify(eval_expr(parse_template(r.key), active));
 }
 
 bool Context::key_matches(const Record& r, const std::string& key) const {
@@ -116,7 +150,8 @@ RecordPtr Context::lookup_in(const RecordPtr& start, const std::string& key,
             }
             return nullptr;
         }
-        if (R->has_key && !active.count(R.get()) && key_matches(*R, key)) return R;
+        if (R->has_key && !active.count(R.get()) && key_matches(*R, key))
+            return R;
         R = R->parent;
     }
     return nullptr;
@@ -137,75 +172,65 @@ rawast::ValuePtr Context::eval(const RecordPtr& winner) const {
 
 rawast::ValuePtr Context::eval_value(const rawast::ValuePtr& v,
                                      std::set<const Record*>& active) const {
-    // Rung 1: only String values carry templates. Scalars/arrays/dicts pass
-    // through unchanged (deep interpolation arrives with the grammar milestone).
+    // Only String values carry templates; everything else passes through.
     if (v && v->type() == rawast::ValueType::String)
-        return interpolate(std::static_pointer_cast<rawast::StringValue>(v)->data(),
-                           active);
+        return eval_expr(
+            parse_template(std::static_pointer_cast<rawast::StringValue>(v)->data()),
+            active);
     return v;
 }
 
-rawast::ValuePtr Context::resolve_ref(const std::string& key,
-                                      std::set<const Record*>& active) const {
-    // Resolve from this view (§5), skipping records already being evaluated:
-    // a placeholder that would resolve to the binding currently being computed
-    // instead walks past it to the next (shadowed) match, so
-    // `x = "${x}-extra"` picks up the inherited value of x. A reference with no
-    // such escape falls off the chain and is reported undefined.
-    std::set<const Record*> merge_visited;
-    RecordPtr w = lookup_in(rec_, key, merge_visited, active);
-    if (!w || std::holds_alternative<DeletedVal>(w->value))
-        throw std::runtime_error("parameda: undefined variable '${" + key + "}'");
-    if (std::holds_alternative<RefVal>(w->value))
-        throw std::runtime_error("parameda: cannot interpolate a link '${" + key +
-                                 "}'");
-    const Record* wp = w.get();
-    active.insert(wp);
-    rawast::ValuePtr r = eval_value(std::get<DataVal>(w->value).value, active);
-    active.erase(wp);
-    return r;
-}
-
-rawast::ValuePtr Context::interpolate(const std::string& t,
-                                      std::set<const Record*>& active) const {
-    // Single-${x} passthrough (§4.3): if the whole string is exactly one
-    // placeholder, return the underlying value untouched (preserves type).
-    if (t.size() >= 3 && t.compare(0, 2, "${") == 0 && t.back() == '}') {
-        std::size_t close = t.find('}', 2);
-        if (close == t.size() - 1)
-            return resolve_ref(t.substr(2, t.size() - 3), active);
-    }
+rawast::ValuePtr Context::eval_expr(const Expr& e,
+                                    std::set<const Record*>& active) const {
+    // Single-action template ⇒ passthrough: return the underlying value with
+    // its type intact (§4.3).
+    if (e.size() == 1 && e[0].kind == Segment::Kind::Action)
+        return eval_action(e[0].action, active);
 
     std::string out;
-    const std::size_t n = t.size();
-    std::size_t i = 0;
-    while (i < n) {
-        if (t[i] == '\\' && i + 1 < n && t[i + 1] == '$') { // escape: \$ -> $
-            out += '$';
-            i += 2;
-            continue;
-        }
-        if (t[i] == '$' && i + 1 < n) {
-            if (t.compare(i, 2, "${") == 0) {
-                std::size_t end = t.find('}', i + 2);
-                if (end != std::string::npos) {
-                    out += stringify(resolve_ref(t.substr(i + 2, end - i - 2), active));
-                    i = end + 1;
-                    continue;
-                }
-            } else if (t.compare(i, 5, "$ENV{") == 0) {
-                std::size_t end = t.find('}', i + 5);
-                if (end != std::string::npos) {
-                    const char* e = std::getenv(t.substr(i + 5, end - i - 5).c_str());
-                    if (e) out += e;
-                    i = end + 1;
-                    continue;
-                }
-            }
-        }
-        out += t[i++];
+    for (const Segment& seg : e) {
+        if (seg.kind == Segment::Kind::Text)
+            out += seg.text;
+        else
+            out += stringify(eval_action(seg.action, active));
     }
     return rawast::make_string(std::move(out));
+}
+
+rawast::ValuePtr Context::eval_action(const Action& a,
+                                      std::set<const Record*>& active) const {
+    if (a.name.empty()) {
+        // Built-in substitution: resolve the (single) argument as a key and
+        // look it up from this view, skipping records under evaluation (§5).
+        if (a.args.size() != 1)
+            throw std::runtime_error(
+                "parameda: ${} substitution takes exactly one argument");
+        std::string key = trim(stringify(eval_expr(a.args[0], active)));
+
+        std::set<const Record*> mv;
+        RecordPtr w = lookup_in(rec_, key, mv, active);
+        if (!w || std::holds_alternative<DeletedVal>(w->value))
+            throw std::runtime_error("parameda: undefined variable '${" + key +
+                                     "}'");
+        if (std::holds_alternative<RefVal>(w->value))
+            throw std::runtime_error("parameda: cannot interpolate a link '${" +
+                                     key + "}'");
+        const Record* wp = w.get();
+        active.insert(wp);
+        rawast::ValuePtr r = eval_value(std::get<DataVal>(w->value).value, active);
+        active.erase(wp);
+        return r;
+    }
+
+    // Named function: look up in the registry and call with evaluated args.
+    auto it = reg_->fns.find(a.name);
+    if (it == reg_->fns.end())
+        throw std::runtime_error("parameda: unknown function '$" + a.name + "{}'");
+    std::vector<rawast::ValuePtr> argv;
+    argv.reserve(a.args.size());
+    for (const Expr& arg : a.args)
+        argv.push_back(eval_expr(arg, active));
+    return it->second(argv, *this);
 }
 
 } // namespace parameda

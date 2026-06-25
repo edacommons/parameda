@@ -54,6 +54,7 @@ set_property(TARGET rawast PROPERTY POSITION_INDEPENDENT_CODE ON)
 # ---------------------------------------------------------------------------
 add_library(parameda STATIC
     src/version.cpp
+    src/expr.cpp
     src/core.cpp
 )
 add_library(parameda::parameda ALIAS parameda)

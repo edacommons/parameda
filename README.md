@@ -59,21 +59,33 @@ view.path("pdk.b")     # 2
 # Merge another context's bindings, with a precedence flag
 defaults = parameda.root().set("opt", "D")
 parameda.root().set("x", 1).merge(defaults).get("opt")   # "D"
+
+# A self-reference picks up the inherited (shadowed) value — super-style
+base = parameda.root().set("path", "/base")
+base.set("path", "${path}:/extra").get("path")           # "/base:/extra"
+
+# Register your own $fn{...}; computed names work too
+cfg = parameda.root()
+cfg.register("join", lambda args: "/".join(args))
+cfg.set("a", "x").set("p", "$join{${a}, y, z}").get("p") # "x/y/z"
 ```
 
-Also available: `$ENV{VAR}` substitution, `\$` to escape a literal `$`,
-`delete(key)` tombstones, `has(key)`, and `parent()`.
+Also available: `$ENV{VAR}`, `\X` to escape a literal character, `delete(key)`
+tombstones, `has(key)`, and `parent()`.
 
 ## Status
 
-Early development. **Milestone 1** is in place and tested: the persistent record
-graph, the upward-stream resolver (with merge splicing and cycle detection), and
-view-anchored rung-1 interpolation (`${key}`, `$ENV{}`), built on rawast values.
+Early development. The core is in place and tested (C++ + Python): the persistent
+record graph, the upward-stream resolver (merge splicing + cycle handling), and
+the expression engine — a hand-rolled parser into an `Expr` AST, evaluated
+view-anchored, with built-in `${…}` substitution, comma-arg functions via a
+**registry** (`$ENV{}` built in, plus C++/Python-registerable functions),
+computed names (`${${x}}`), whole-string passthrough, and `super`-style
+self-reference.
 
-Next up: a dedicated `parameda.rawast` grammar that parses templates into a
-walkable expression AST (replacing the current hand-written interpolation), full
-AST keys, and JSON load/save via rawast's bidirectional serialization. Open
-design questions are tracked in [`docs/SPEC.md`](docs/SPEC.md) §9.
+Next up: a small standard function set, `$JSON{}` (loading a file as a
+sub-folder), JSON load/save of the record graph, and a `check`/resolvability
+pass. Open design questions are tracked in [`docs/SPEC.md`](docs/SPEC.md) §9.
 
 ## Building
 

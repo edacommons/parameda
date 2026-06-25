@@ -1,6 +1,7 @@
 // parameda Python binding — exposes the Context handle and its functional
 // builders / resolvers. Values convert directly between rawast's Value family
-// and native Python objects (None/bool/int/float/str/list/dict).
+// and native Python objects (None/bool/int/float/str/list/dict). `$name{}`
+// functions can be registered as Python callables.
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
@@ -89,7 +90,7 @@ nb::object get_object(const Context& c, const std::string& key) {
     if (!w || std::holds_alternative<DeletedVal>(w->value))
         throw nb::key_error(key.c_str());
     if (std::holds_alternative<RefVal>(w->value))
-        return nb::cast(Context(std::get<RefVal>(w->value).target));
+        return nb::cast(c.sub(std::get<RefVal>(w->value).target));
     return value_to_py(c.eval(w));
 }
 
@@ -131,6 +132,24 @@ NB_MODULE(_native, m) {
                                                     : MergeOrder::WalkUpFirst);
              },
              nb::arg("target"), nb::arg("merge_first") = true)
+        // NOTE: the callable is held as an nb::object inside the C++ registry.
+        // Under normal scoping it collects fine, but it is not yet wired into
+        // Python's cyclic GC, so a callback that closes over a Context leaks,
+        // and a module-global Context kept to interpreter exit prints a benign
+        // nanobind teardown warning. See SPEC §9(8).
+        .def("register",
+             [](const Context& s, const std::string& name, nb::object fn) {
+                 s.register_fn(name, [fn](const std::vector<rawast::ValuePtr>& args,
+                                          const Context&) -> rawast::ValuePtr {
+                     nb::gil_scoped_acquire gil;
+                     nb::list pyargs;
+                     for (const auto& a : args) pyargs.append(value_to_py(a));
+                     return py_to_value(fn(pyargs));
+                 });
+             },
+             nb::arg("name"), nb::arg("callback"),
+             "Register a $name{...} function. The callable receives a list of "
+             "evaluated arguments and returns a value. Affects this lineage.")
         .def("get", &get_object, nb::arg("key"))
         .def("has", [](const Context& s, const std::string& key) {
             return s.has(key);
@@ -148,7 +167,7 @@ NB_MODULE(_native, m) {
                          throw nb::value_error(
                              ("parameda: path segment is not a link: " + parts[i])
                                  .c_str());
-                     cur = Context(std::get<RefVal>(w->value).target);
+                     cur = cur.sub(std::get<RefVal>(w->value).target);
                  }
                  return get_object(cur, parts.back());
              },

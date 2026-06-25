@@ -176,32 +176,44 @@ A `Deleted` value is a tombstone for the record's `key`. See §2.
 
 ---
 
-## 4. Keys and values are rawast ASTs
+## 4. Keys and values
 
-Both the `key` and the `value` of a record are stored as **rawast ASTs**, parsed
-once at write time and kept in AST form (not as raw text, not as a pre-evaluated
-result), using the **same grammar** (§4.1) and the **same evaluator** (§5). This
-gives:
+A record's `value` is stored as a **rawast Value** (Null/Bool/Int/UInt/Real/
+String/Array/Dict). rawast is the load-bearing value type — it gives typing and
+JSON load/save for free. A record's `key` is a string (literal or template).
 
-- **Typing for free** — values use rawast's `Value` model
-  (Null/Bool/Int/UInt/Real/String/Array/…). The question "is `${v}` where `v=10`
-  an int or a string?" is answered by *what the AST node is*, not by a parameda
-  rule.
-- **Expressions as ASTs, not string rescans** — a template is parsed into an AST
-  once; evaluation interprets that AST against the view (§5). `${…}`, `$ENV{…}`,
-  `$JSON{…}`, and any `$fn{…}` are all the same node type (§4.2), not regex passes.
-- **Computed keys** — a key may itself be an expression (§4.4), the natural dual
-  of dynamic values.
-- **Bidirectional serialization** — rawast saves AST → text, so persisting and
-  round-tripping keys and values is free, and values authored in existing EDA
-  formats can be ingested.
+When a value (or key) is a **string**, it is a **template** in parameda's
+expression mini-language (§4.2): literal text interleaved with `$name{…}`
+placeholders. Templates are parsed by a small hand-rolled parser (§4.1) into an
+`Expr` AST and evaluated against the view (§5). This gives:
 
-### 4.1 Dedicated expression grammar
+- **Typing for free** — a value set as `10` is an Int; a value set as `"10"` is
+  the string "10". "Is `${v}` an int or a string?" is answered by what was
+  stored, not by a parameda rule (§4.3).
+- **Computed keys** — a key may itself be a template (§4.4), the dual of dynamic
+  values.
+- **Trivial serialization** — the stored form *is* the authored string (plus
+  rawast Values for non-string data), so persisting/round-tripping needs no
+  AST→text step; the original text is kept verbatim.
 
-Parameda defines its **own** rawast grammar (`grammars/parameda.rawast`) for the
-key/value/expression language — *not* a reuse of the Tcl grammar. Reasons: the
-surface is exactly what parameda needs, and it is bidirectional for free. (Tcl
-and other rawast grammars remain available as *ingest* formats.)
+### 4.1 Hand-rolled parser, not a grammar
+
+The expression language is parsed by a small hand-written recursive-descent
+parser (`src/expr.cpp`) into the `Expr` AST (`include/parameda/expr.hpp`) — **not**
+by a rawast grammar. A rawast grammar was specced and prototyped, then dropped:
+
+- Its marquee benefit — free *bidirectional* serialization (AST → text on save) —
+  doesn't apply: parameda stores the authored string and never reconstructs text
+  from the expression AST.
+- It wasn't even "declarative for free": the literal-text runs needed custom C++
+  terminal parsers anyway, at which point a full hand-rolled parser for a
+  one-production language is *less* code than grammar + terminals + registration +
+  AST-walker — and it is compiled, with no runtime grammar interpretation.
+
+rawast remains the **value/data model** (typed Values + JSON load/save); it is no
+longer in the expression path. The `Expr` AST: a template is a list of segments,
+each either literal `Text` or an `Action{name, args}`; each arg is a nested
+template.
 
 ### 4.2 Expression language — one form, two behaviors
 
@@ -223,44 +235,48 @@ $name{ arg, arg, … }
   registered callback.
 
 - **Named → a registered callback.** `$fn{args}` looks `fn` up in a **function
-  registry** and calls it. Functions don't understand the graph; they receive
-  evaluated arguments and return a value. `ENV` and `JSON` are just preregistered
-  built-ins, and user functions register the same way. This is the language's
-  extension surface; the engine core stays minimal.
+  registry** (shared across a context lineage) and calls it. Functions don't
+  understand the graph; they receive evaluated arguments and return a value. `ENV`
+  is a preregistered built-in, and user functions register the same way. This is
+  the language's extension surface; the engine core stays minimal.
 
 **Callback contract:**
 
 - **Signature:** `callback(args: [Value], ctx) -> Value`. Most functions touch
-  only `args`; `ctx` is a handle back into the engine/view for functions that
-  need it (notably `JSON`, which builds a sub-context).
+  only `args`; `ctx` is a handle back into the calling view.
 - **Eager arguments.** Args are evaluated from the view *before* the callback is
-  called. (A future special-form door — a callback opting into raw, unevaluated
-  arg ASTs — is what a lazy `$if{cond, then, else}` would need; deferred, see §9.)
-- **Return is the full value union** (§3): a callback may return data *or* a
-  `Ref`/sub-context. `JSON` returns a sub-context, not a scalar.
+  called, with each arg's leading/trailing *literal* whitespace trimmed at parse
+  time (template text only — never a value's content). A future special-form door
+  — a callback opting into raw, unevaluated arg ASTs — is what a lazy
+  `$if{cond, then, else}` would need; deferred, see §9.
+- **Return.** Currently a callback returns a **data** Value. Widening the return
+  to the full value union (so a callback like `JSON` can return a `Ref`/
+  sub-context) is a deferred follow-up.
 - **Registration from C++ and Python.** A Python callable can be registered as a
   config function (values cross the same rawast⇄Python boundary as everywhere
   else) — `cfg.register("slug", fn)` — making the language user-extensible without
-  touching the grammar or the core.
+  touching the core. Registration mutates the shared registry (engine-wide
+  setup), not the record graph.
 - **Unknown `name`** → an error at evaluation (and flagged by the future `check`
   pass, §11).
 
-**Built-ins** (shipped, registered through the same callback API):
+**Built-ins:**
 
-- `$ENV{VAR}` — environment variable (effectful; reads the host env).
+- `$ENV{VAR}` — environment variable, empty if unset (shipped).
 - `$JSON{path}` — load a JSON file as a lazily-loaded, **cached** sub-folder /
-  sub-context (effectful; needs `ctx`; memoized — see §11). NOT inlined text.
+  sub-context (**deferred**: needs the callback return widened to the value union;
+  memoized — see §11). NOT inlined text.
 
-Functions are tagged **pure** vs **effectful** so the `check` pass and the
+Functions will be tagged **pure** vs **effectful** so the `check` pass and the
 memoization layer know what is safe to cache (§11).
 
-**Escaping:** `\$` (or `$$` — **OPEN**, pick one) emits a literal `$`.
+**Escaping:** `\X` emits the literal character `X` (so `\$` → `$`, `\}` → `}`).
 
-**Staging.** v1 ships built-in substitution plus the `ENV`/`JSON` built-ins and
-the registry mechanism. A small standard function set (path join, string
-concat/format, arithmetic, conditional) lands as registered callbacks afterward —
-no grammar change required, which is the point of the unified form. A lazy
-special-form (`if`) is deferred until the raw-args door is opened.
+**Staging.** Shipped: the hand-rolled parser + `Expr` AST, built-in substitution,
+the function registry with the `ENV` built-in, and C++/Python function
+registration. Next: a small standard function set (path join, string
+concat/format, arithmetic, conditional) as registered callbacks; `$JSON{}` (needs
+the value-union return); a lazy special-form (`if`) once the raw-args door opens.
 
 ### 4.3 Typing model: EIAS-lite with passthrough
 
@@ -440,13 +456,19 @@ Notes:
   **scikit-build-core**. Mirrors the conventions of the sibling project
   [`rawast`](https://github.com/edacommons/rawast).
 - **Persistent tree:** records are immutable and shared
-  (`shared_ptr<const Record>`), each holding a `parent` handle plus
-  `key`/`value` ASTs. A context is a record handle.
-  `set`/`link`/`merge`/`delete` allocate one new record and reuse all existing
-  ancestry. Cheap branching and snapshots fall out for free.
-- **Resolver:** the upward generator (§2) is an iterator holding a stack of
-  sub-iterators; a `Merge` pushes a sub-iterator per its flag. Lookup advances the
-  stream until a candidate's resolved key matches.
+  (`shared_ptr<const Record>`), each holding a `parent` handle plus a `key` string
+  and a `value` (rawast Value or a graph construct). A context is a record handle
+  plus a shared function registry. `set`/`link`/`merge`/`delete` allocate one new
+  record, reuse all existing ancestry, and share the registry. Cheap branching and
+  snapshots fall out for free.
+- **Resolver:** the upward walk (§2) is recursive; a `Merge` recurses into its
+  target per its flag, with a visited-set guard. Lookup advances until a
+  candidate's resolved key matches and the record is not currently being
+  evaluated (the skip-and-continue `active` set, §5).
+- **Expressions:** a hand-rolled recursive-descent parser (`src/expr.cpp`) turns a
+  string template into the `Expr` AST (`expr.hpp`); the evaluator walks it
+  view-anchored (§4.1, §5). Functions live in a `Registry` shared across the
+  lineage; `ENV` is built in, and callbacks register from C++ or Python.
 - **rawast dependency:** linked via CMake **`FetchContent`**, pinned to a rawast
   **tag** (not a moving branch) for reproducible builds. Local co-development uses
   `-DFETCHCONTENT_SOURCE_DIR_RAWAST=…` to build against a working tree without
@@ -467,11 +489,12 @@ FetchContent_MakeAvailable(rawast)
 
 ## 9. Open questions (consolidated)
 
-1. Expression escaping: `\$` vs `$$` for a literal `$`.
-2. Function calls: lazy/special-form support (raw, unevaluated arg ASTs) for a
-   `$if{…}`-style conditional — when to open that door (§4.2). Also: may user
-   functions **override** a built-in name (`ENV`/`JSON`), or are built-ins
-   reserved?
+1. ~~Expression escaping~~ — RESOLVED: blanket `\X` → literal `X` (§4.2).
+2. Function calls: (a) widen the callback return to the value union so a function
+   can yield a `Ref`/sub-context (needed for `$JSON{}`); (b) lazy/special-form
+   support (raw, unevaluated arg ASTs) for a `$if{…}`-style conditional — when to
+   open that door (§4.2); (c) may user functions **override** a built-in name
+   (`ENV`), or are built-ins reserved?
 3. `get`/`has` error/return conventions for undefined and for `Ref` results.
 4. On-disk serialization format for the record graph (keys/values already covered
    by rawast). Flat `(parent, key, value)` rows are the leading candidate.
@@ -480,6 +503,13 @@ FetchContent_MakeAvailable(rawast)
 7. Confirm the two key-resolution decisions in §4.4 (resolve-from-view;
    keys-must-be-strings) — currently DECIDED with defaults, flagged as flip
    candidates.
+8. Python-registered callbacks + nanobind GC. The C++ registry holds the Python
+   callable as an `nb::object`; under normal scoping it collects fine, but (a) a
+   `Context` retained in module globals to interpreter exit prints a benign
+   nanobind "leaked instance" teardown warning, and (b) a callback that *closes
+   over a Context* forms a reference cycle nanobind cannot trace (a real leak).
+   Proper fix: integrate the registry with Python's cyclic GC (tp_traverse) or
+   hold callables on the Python side. Deferred.
 
 ---
 

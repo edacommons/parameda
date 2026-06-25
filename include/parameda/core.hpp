@@ -2,32 +2,46 @@
 
 // Parameda core — the persistent record graph and the view-anchored resolver.
 //
-// This is Milestone 1 of the design in docs/SPEC.md. It implements:
+// Implements the design in docs/SPEC.md:
 //   - the immutable (parent, key, value) record tree (§1)
 //   - the upward-stream resolver with merge splicing + cycle guards (§2)
-//   - view-anchored evaluation (§5) with rung-1 interpolation (§4.2)
+//   - view-anchored evaluation (§5) of the expression mini-language (§4),
+//     parsed by the hand-rolled parser in expr.hpp into an Expr AST.
 //
-// Values are stored as rawast Values (the load-bearing value type), so typing
-// and serialization come from rawast. Two things from the spec are deliberately
-// NOT yet here and are tracked as later milestones:
-//   - the dedicated `parameda.rawast` grammar that parses templates into a
-//     walkable expression AST. For now expressions live inside rawast String
-//     values and are interpolated by hand (rung 1: ${key}, $ENV{}).
-//   - computed keys are supported only as string templates with a literal
-//     fast-path; full AST keys arrive with the grammar.
+// Values are stored as rawast Values (the load-bearing value type); typing and
+// JSON serialization come from rawast. Expressions live inside rawast String
+// values and are parsed/evaluated by parameda.
 
+#include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include <rawast/value.hpp>
+
+#include <parameda/expr.hpp>
 
 namespace parameda {
 
 struct Record;
 using RecordPtr = std::shared_ptr<const Record>;
+
+class Context;
+
+// A registered `$name{…}` function. Receives evaluated arguments and a handle
+// to the calling view; returns a value. ENV is a preregistered built-in.
+using Callback =
+    std::function<rawast::ValuePtr(const std::vector<rawast::ValuePtr>& args,
+                                   const Context& view)>;
+
+// Engine-wide function registry, shared across a context lineage (§4.2).
+struct Registry {
+    std::map<std::string, Callback> fns;
+};
 
 // Splice order for a merge record (§3.2).
 enum class MergeOrder { MergeFirst, WalkUpFirst };
@@ -44,21 +58,27 @@ using Value = std::variant<DataVal, RefVal, MergeVal, DeletedVal>;
 struct Record {
     RecordPtr parent;   // null at the root
     bool has_key;       // false for the root and for merge records
-    std::string key;    // literal, or a rung-1 template (may contain ${...})
+    std::string key;    // literal, or a template (may contain ${...})
     Value value;
 };
 
-// A handle to one record — the "view" you are standing on. All operations are
-// functional: builders return a new Context and never mutate an existing one.
+// A handle to one record — the "view" you are standing on — plus the shared
+// function registry. All builders are functional: they append a child layer and
+// return a new Context sharing the same registry.
 class Context {
 public:
-    explicit Context(RecordPtr rec) : rec_(std::move(rec)) {}
+    Context(RecordPtr rec, std::shared_ptr<Registry> reg)
+        : rec_(std::move(rec)), reg_(std::move(reg)) {}
 
-    // A fresh, empty root context.
+    // A fresh, empty root context with built-in functions installed (e.g. ENV).
     static Context root();
 
     const RecordPtr& record() const { return rec_; }
+    const std::shared_ptr<Registry>& registry() const { return reg_; }
     std::optional<Context> parent() const;
+
+    // A view on another record, sharing this context's registry.
+    Context sub(RecordPtr rec) const { return Context(std::move(rec), reg_); }
 
     // --- builders (append a child layer, return the new view) -----------
     Context set(std::string key, rawast::ValuePtr value) const;
@@ -66,16 +86,16 @@ public:
     Context link(std::string key, const Context& target) const;
     Context merge(const Context& target, MergeOrder order) const;
 
-    // --- resolution (this context is the view) --------------------------
-    // The winning record for `key` (nullptr if none). The result may hold a
-    // DeletedVal — callers treat that as "undefined".
-    RecordPtr lookup(const std::string& key) const;
+    // Register a `$name{…}` function. Mutates the shared registry, so it affects
+    // every context in this lineage; it does not change the record graph.
+    void register_fn(std::string name, Callback cb) const;
 
-    // True if `key` resolves to a live (non-deleted) record.
+    // --- resolution (this context is the view) --------------------------
+    RecordPtr lookup(const std::string& key) const;       // winning record or nullptr
     bool has(const std::string& key) const;
 
-    // Evaluate a winning record's DataVal as data, interpolating from this
-    // view (§5). Precondition: `winner` holds a DataVal.
+    // Evaluate a winning record's DataVal as data, from this view (§5).
+    // Precondition: `winner` holds a DataVal.
     rawast::ValuePtr eval(const RecordPtr& winner) const;
 
 private:
@@ -87,12 +107,13 @@ private:
 
     rawast::ValuePtr eval_value(const rawast::ValuePtr& v,
                                 std::set<const Record*>& active) const;
-    rawast::ValuePtr interpolate(const std::string& tmpl,
-                                 std::set<const Record*>& active) const;
-    rawast::ValuePtr resolve_ref(const std::string& key,
+    rawast::ValuePtr eval_expr(const Expr& e,
+                               std::set<const Record*>& active) const;
+    rawast::ValuePtr eval_action(const Action& a,
                                  std::set<const Record*>& active) const;
 
     RecordPtr rec_;
+    std::shared_ptr<Registry> reg_;
 };
 
 } // namespace parameda

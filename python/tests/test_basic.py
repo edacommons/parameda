@@ -67,6 +67,26 @@ def test_merge_order():
     assert base.merge(defaults, merge_first=False).get("opt") == "B"
 
 
+def test_env_function(monkeypatch):
+    monkeypatch.setenv("PARAMEDA_PY_ENV", "abc")
+    assert parameda.root().set("e", "$ENV{PARAMEDA_PY_ENV}").get("e") == "abc"
+
+
+def test_register_python_function():
+    root = parameda.root()
+    root.register("join", lambda args: "/".join(args))
+    cfg = root.set("a", "x").set("p", "$join{${a}, y, z}")
+    assert cfg.get("p") == "x/y/z"
+
+
+def test_computed_indirect_name():
+    cfg = (parameda.root()
+           .set("which", "target")
+           .set("target", 99)
+           .set("v", "${${which}}"))
+    assert cfg.get("v") == 99
+
+
 def test_missing_key_raises():
     with pytest.raises(KeyError):
         parameda.root().get("nope")
