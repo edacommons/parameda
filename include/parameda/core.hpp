@@ -98,7 +98,23 @@ public:
     // Precondition: `winner` holds a DataVal.
     rawast::ValuePtr eval(const RecordPtr& winner) const;
 
+    // --- JSON persistence -----------------------------------------------
+    // Apply a JSON object as a chain of records onto this context, returning the
+    // new tip. Scalars/arrays become `set`s; nested objects become linked
+    // sub-folders (so they inherit via walk-up and delimit their own locals).
+    Context load_json(const std::string& json_text) const;
+
+    // The config as a (nested) dict Value: raw stored values, or fully evaluated
+    // from each folder's view when `evaluated` is true. Folder locals are the
+    // chain records up to the branch point; a link recurses to a nested object.
+    rawast::ValuePtr to_value(bool evaluated) const;
+
+    // Serialize to JSON text (raw by default; evaluated snapshot when asked).
+    std::string dump_json(bool evaluated) const;
+
 private:
+    rawast::ValuePtr dump_folder(const Record* boundary, bool evaluated) const;
+
     RecordPtr lookup_in(const RecordPtr& start, const std::string& key,
                         std::set<const Record*>& merge_visited,
                         const std::set<const Record*>& active) const;

@@ -7,6 +7,8 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <variant>
 #include <vector>
@@ -155,6 +157,34 @@ NB_MODULE(_native, m) {
             return s.has(key);
         }, nb::arg("key"))
         .def("parent", &Context::parent)
+        .def("load_json",
+             [](const Context& s, const std::string& json) { return s.load_json(json); },
+             nb::arg("json"),
+             "Apply a JSON object string onto this context, returning the new tip.")
+        .def("load_json_file",
+             [](const Context& s, const std::string& path) {
+                 std::ifstream in(path, std::ios::binary);
+                 if (!in)
+                     throw nb::value_error(("parameda: cannot open " + path).c_str());
+                 std::ostringstream ss;
+                 ss << in.rdbuf();
+                 return s.load_json(ss.str());
+             },
+             nb::arg("path"))
+        .def("to_dict",
+             [](const Context& s) { return value_to_py(s.to_value(true)); },
+             "The fully evaluated config as a nested dict.")
+        .def("to_json",
+             [](const Context& s, bool evaluated) { return s.dump_json(evaluated); },
+             nb::arg("evaluated") = false)
+        .def("save_json",
+             [](const Context& s, const std::string& path, bool evaluated) {
+                 std::ofstream out(path, std::ios::binary);
+                 if (!out)
+                     throw nb::value_error(("parameda: cannot write " + path).c_str());
+                 out << s.dump_json(evaluated);
+             },
+             nb::arg("path"), nb::arg("evaluated") = false)
         .def("path",
              [](const Context& s, const std::string& dotted) -> nb::object {
                  std::vector<std::string> parts = split_path(dotted);

@@ -170,3 +170,37 @@ TEST_CASE("escaped dollar and brace are literal") {
     Context c = Context::root().set("v", make_string("\\${x} and \\}"));
     CHECK(as_s(g(c, "v")) == "${x} and }");
 }
+
+TEST_CASE("json load: nested folders inherit and round-trip") {
+    std::string json =
+        R"({"root":"/opt","log":"${root}/x.log","build":{"dir":"${root}/b","name":"top"}})";
+    Context c = Context::root().load_json(json);
+
+    CHECK(as_s(g(c, "root")) == "/opt");
+    CHECK(as_s(g(c, "log")) == "/opt/x.log");
+
+    RecordPtr w = c.lookup("build");
+    REQUIRE(w);
+    REQUIRE(std::holds_alternative<RefVal>(w->value));
+    Context b = c.sub(std::get<RefVal>(w->value).target);
+    CHECK(as_s(g(b, "dir")) == "/opt/b"); // ${root} inherited through the link
+    CHECK(as_s(g(b, "name")) == "top");
+    CHECK(c.lookup("dir") == nullptr); // sub-folder keys are not leaked to parent
+
+    // Raw round-trip: dump (templates preserved) and reload.
+    Context c2 = Context::root().load_json(c.dump_json(false));
+    CHECK(as_s(g(c2, "log")) == "/opt/x.log");
+    Context b2 = c2.sub(std::get<RefVal>(c2.lookup("build")->value).target);
+    CHECK(as_s(g(b2, "dir")) == "/opt/b");
+}
+
+TEST_CASE("json evaluated snapshot resolves templates") {
+    Context c = Context::root().load_json(
+        R"({"root":"/opt","log":"${root}/x.log"})");
+    // The evaluated dump, reloaded, stores the resolved literal — not a template.
+    Context snap = Context::root().load_json(c.dump_json(true));
+    RecordPtr w = snap.lookup("log");
+    REQUIRE(w);
+    REQUIRE(std::holds_alternative<DataVal>(w->value));
+    CHECK(as_s(std::get<DataVal>(w->value).value) == "/opt/x.log");
+}

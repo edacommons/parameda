@@ -56,6 +56,7 @@ add_library(parameda STATIC
     src/version.cpp
     src/expr.cpp
     src/core.cpp
+    src/persist.cpp
 )
 add_library(parameda::parameda ALIAS parameda)
 

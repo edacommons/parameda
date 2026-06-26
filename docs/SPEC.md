@@ -383,6 +383,10 @@ ctx.raw(key)                    -> AST | None    # winning record's unevaluated 
 ctx.parent()                    -> ctx | None
 
 register(name, callback)                         # register a $name{…} function (§4.2)
+
+ctx.load_json(text) / load_json_file(path)  -> ctx'   # apply JSON, return new tip (§7.2)
+ctx.to_dict()                               -> dict   # evaluated nested snapshot
+ctx.to_json(evaluated=False) / save_json(path)        # serialize (raw | evaluated)
 ```
 
 - **`set` takes a single key only.** Dotted-path convenience (`"build.pass1.log"`)
@@ -448,6 +452,32 @@ Notes:
   descending makes `r2` the view, so it resolves `b=2` from the folder's own tip —
   consistent with §5.
 
+### 7.2 JSON persistence
+
+Configs load from / save to **nested JSON**, mirroring the *structure* of the
+record graph rather than a flattened view (resolving §9.4 toward nested JSON, not
+flat rows). The mapping reuses the existing link pattern (§7.1) — no new record
+type:
+
+- a JSON **object ⟺ a folder**; a **nested object ⟺ a linked sub-folder**; a
+  scalar/array ⟺ a `set` value (string values stay templates).
+- **`load_json`** applies an object onto a context as a chain of records: scalars
+  first, then sub-folders built off the completed tip and linked. Building
+  sub-folders last (and off the finished tip) means a sub-folder **inherits all of
+  its parent's keys** via walk-up, regardless of JSON key order.
+- **`save` / `to_value`** enumerate each folder's *local* records — from the tip
+  up to its **branch point** (a link record's parent), nearest-wins per key — and
+  recurse into a `Ref` as a nested object. The branch point *is* the boundary, so
+  enumeration emits locals only while resolution still inherits. Raw mode keeps
+  templates verbatim (round-trips); `evaluated`/`to_dict` resolves each value from
+  its folder view.
+
+**Limitations (v1):** only the `set`/`link`/`delete` tree round-trips. Merge
+records are not serialized, and the branch-point boundary assumes the canonical
+construction (a linked chain passes through the link's parent), which always holds
+for `load_json`-built configs; arbitrary cross-branch links would need node-id
+references — deferred.
+
 ---
 
 ## 8. Implementation shape
@@ -496,8 +526,9 @@ FetchContent_MakeAvailable(rawast)
    open that door (§4.2); (c) may user functions **override** a built-in name
    (`ENV`), or are built-ins reserved?
 3. `get`/`has` error/return conventions for undefined and for `Ref` results.
-4. On-disk serialization format for the record graph (keys/values already covered
-   by rawast). Flat `(parent, key, value)` rows are the leading candidate.
+4. ~~On-disk serialization format~~ — RESOLVED: nested JSON mirroring the folder
+   structure (§7.2), via rawast's JSON parse/save. Faithful full-graph dump
+   (merges, cross-branch links via node ids) remains a later extension.
 5. Opaque host-object values as a non-serializable escape hatch — in or out?
 6. `cnode` positional/indexed children (arrays) — deferred; revisit when needed.
 7. Confirm the two key-resolution decisions in §4.4 (resolve-from-view;

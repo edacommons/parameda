@@ -87,6 +87,28 @@ def test_computed_indirect_name():
     assert cfg.get("v") == 99
 
 
+def test_json_load_nested_and_to_dict():
+    cfg = parameda.root().load_json(
+        '{"root": "/opt", "log": "${root}/x.log",'
+        ' "build": {"dir": "${root}/b", "name": "top"}}')
+    assert cfg.get("log") == "/opt/x.log"
+    assert cfg.path("build.dir") == "/opt/b"   # sub-folder inherits ${root}
+    assert cfg.to_dict() == {
+        "root": "/opt",
+        "log": "/opt/x.log",
+        "build": {"dir": "/opt/b", "name": "top"},
+    }
+
+
+def test_json_round_trip(tmp_path):
+    src = '{"root": "/opt", "build": {"dir": "${root}/b"}}'
+    a = parameda.root().load_json(src)
+    f = tmp_path / "cfg.json"
+    a.save_json(str(f))                      # raw: templates preserved
+    b = parameda.root().load_json_file(str(f))
+    assert b.path("build.dir") == "/opt/b"
+
+
 def test_missing_key_raises():
     with pytest.raises(KeyError):
         parameda.root().get("nope")

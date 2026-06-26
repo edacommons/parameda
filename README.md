@@ -68,6 +68,13 @@ base.set("path", "${path}:/extra").get("path")           # "/base:/extra"
 cfg = parameda.root()
 cfg.register("join", lambda args: "/".join(args))
 cfg.set("a", "x").set("p", "$join{${a}, y, z}").get("p") # "x/y/z"
+
+# Load nested JSON; sub-objects become folders that inherit enclosing vars
+cfg = parameda.root().load_json(
+    '{"root": "/opt", "build": {"dir": "${root}/b"}}')
+cfg.path("build.dir")   # "/opt/b"  (the build folder inherits ${root})
+cfg.to_dict()           # {"root": "/opt", "build": {"dir": "/opt/b"}}  (evaluated)
+cfg.save_json("out.json")   # raw — templates preserved for round-trip
 ```
 
 Also available: `$ENV{VAR}`, `\X` to escape a literal character, `delete(key)`
@@ -81,11 +88,12 @@ the expression engine — a hand-rolled parser into an `Expr` AST, evaluated
 view-anchored, with built-in `${…}` substitution, comma-arg functions via a
 **registry** (`$ENV{}` built in, plus C++/Python-registerable functions),
 computed names (`${${x}}`), whole-string passthrough, and `super`-style
-self-reference.
+self-reference. Plus **JSON persistence** — `load_json`/`save_json`/`to_dict`,
+where nested objects become inheriting sub-folders and templates round-trip raw.
 
 Next up: a small standard function set, `$JSON{}` (loading a file as a
-sub-folder), JSON load/save of the record graph, and a `check`/resolvability
-pass. Open design questions are tracked in [`docs/SPEC.md`](docs/SPEC.md) §9.
+sub-folder), and a `check`/resolvability pass. Open design questions are tracked
+in [`docs/SPEC.md`](docs/SPEC.md) §9.
 
 ## Building
 
