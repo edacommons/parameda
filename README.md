@@ -91,9 +91,11 @@ computed names (`${${x}}`), whole-string passthrough, and `super`-style
 self-reference. Plus **JSON persistence** — `load_json`/`save_json`/`to_dict`,
 where nested objects become inheriting sub-folders and templates round-trip raw.
 
-Next up: a small standard function set, `$JSON{}` (loading a file as a
-sub-folder), and a `check`/resolvability pass. Open design questions are tracked
-in [`docs/SPEC.md`](docs/SPEC.md) §9.
+Next up: a small standard function set and a `check`/resolvability pass. File
+composition (loading another config as a sub-folder) lives in the load/format
+layer — `load_json_file` + `link`/`merge` today, a load-time include directive
+later — not as an expression function. Open design questions are tracked in
+[`docs/SPEC.md`](docs/SPEC.md) §9.
 
 ## Building
 

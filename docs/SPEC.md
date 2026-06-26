@@ -262,12 +262,19 @@ $name{ arg, arg, … }
 
 **Built-ins:**
 
-- `$ENV{VAR}` — environment variable, empty if unset (shipped).
-- `$JSON{path}` — load a JSON file as a lazily-loaded, **cached** sub-folder /
-  sub-context (**deferred**: needs the callback return widened to the value union;
-  memoized — see §11). NOT inlined text.
+- `$ENV{VAR}` — environment variable, empty if unset (shipped). `ENV` is the
+  boundary case worth keeping inline: tiny and read-only.
 
-Functions will be tagged **pure** vs **effectful** so the `check` pass and the
+**Not an expression function: file composition.** An earlier plan had a
+`$JSON{path}` function loading a file as a sub-folder (from `cfg.py`). It is
+**dropped** from the expression language. File I/O during `get()` is a surprising
+side effect on the hot path (caching, errors, sandboxing), and the need —
+composing a config from external files — belongs to the **load/format layer**,
+where I/O is expected: `load_json_file` + `link`/`merge` today, and a load-time
+include directive in the §7.2 format later. Keeping it out also means functions
+stay "args → data value" (no value-union return needed; see §9.2).
+
+Functions will be tagged **pure** vs **effectful** so a later `check` pass and a
 memoization layer know what is safe to cache (§11).
 
 **Escaping:** `\X` emits the literal character `X` (so `\$` → `$`, `\}` → `}`).
@@ -275,8 +282,9 @@ memoization layer know what is safe to cache (§11).
 **Staging.** Shipped: the hand-rolled parser + `Expr` AST, built-in substitution,
 the function registry with the `ENV` built-in, and C++/Python function
 registration. Next: a small standard function set (path join, string
-concat/format, arithmetic, conditional) as registered callbacks; `$JSON{}` (needs
-the value-union return); a lazy special-form (`if`) once the raw-args door opens.
+concat/format, arithmetic, conditional) as registered callbacks; a lazy
+special-form (`if`) once the raw-args door opens. File composition is *not* on
+this list — it lives in the load/format layer (§7.2), not as a function.
 
 ### 4.3 Typing model: EIAS-lite with passthrough
 
@@ -491,6 +499,10 @@ new elements map closely to YAML anchors/aliases:
 - **a merge directive with the order flag** — e.g. `<<: *defaults` /
   `<<!: *defaults` for merge-first vs walk-up-first (§3.2).
 - **a delete marker** — a tombstone token for a key.
+- **a file include** — a load-time `!include "path"` directive pulling another
+  config file in as a sub-folder. This is the home for `cfg.py`'s old `$JSON{}`
+  role (composition), now at the load layer where I/O is expected — not an
+  eval-time expression function (§4.2, §11).
 - optionally **explicit node ids** to preserve sharing/branching, not just trees.
 
 rawast emits these as tagged dicts (`{type:"ref", id:…}`, `{type:"merge", …}`)
@@ -542,11 +554,13 @@ FetchContent_MakeAvailable(rawast)
 ## 9. Open questions (consolidated)
 
 1. ~~Expression escaping~~ — RESOLVED: blanket `\X` → literal `X` (§4.2).
-2. Function calls: (a) widen the callback return to the value union so a function
-   can yield a `Ref`/sub-context (needed for `$JSON{}`); (b) lazy/special-form
-   support (raw, unevaluated arg ASTs) for a `$if{…}`-style conditional — when to
-   open that door (§4.2); (c) may user functions **override** a built-in name
-   (`ENV`), or are built-ins reserved?
+2. Function calls: (a) widening the callback return to the value union (so a
+   function could yield a `Ref`/sub-context) — **only if a real need appears**; the
+   `$JSON{}` use case that motivated it has moved to the load/format layer (§7.2),
+   so functions stay "args → data value" for now. (b) lazy/special-form support
+   (raw, unevaluated arg ASTs) for a `$if{…}`-style conditional — when to open that
+   door (§4.2); (c) may user functions **override** a built-in name (`ENV`), or are
+   built-ins reserved?
 3. `get`/`has` error/return conventions for undefined and for `Ref` results.
 4. ~~On-disk serialization format~~ — RESOLVED: nested JSON mirroring the folder
    structure (§7.2), via rawast's JSON parse/save. Faithful full-graph dump
@@ -596,19 +610,21 @@ Confirms what Milestone 1 already does:
   a single part un-stringified and joins multiple parts as text — identical to
   our whole-string-`${x}` passthrough vs. embedded coercion.
 
-Mechanisms to ADOPT at the grammar milestone (§4.1):
+Mechanisms drawn from it:
 
 1. **Computed / indirect names.** `cfg.py` recursively parses the text *inside* a
    placeholder, so `${${x}}` evaluates the inner expression to produce the name.
-   This is the concrete realization of "keys are ASTs" (§4.4): the grammar should
-   let a placeholder body be a full expression.
-2. **`$JSON{path}` yields a folder, not text.** It loads the file as a
-   lazily-evaluated, **cached** sub-folder (sub-context). Implement `$JSON` as a
-   `Ref`-like sub-context with memoization — not the inlined-text behavior of the
-   throwaway early scaffold.
+   **Adopted** — the hand-rolled parser (§4.1) parses each placeholder body as a
+   full expression, so `${${x}}` works.
+2. **File composition yields a folder, not text.** `cfg.py`'s `$JSON{path}` loads
+   a file as a sub-folder. parameda keeps this idea but **not as an expression
+   function** (§4.2): file I/O during evaluation is a footgun. Composition lives in
+   the load/format layer — `load_json_file` + `link`/`merge` today, a load-time
+   include directive in the §7.2 format later (which is where "yields a folder"
+   belongs).
 3. **`check` vs `evaluate` split + memoization.** A resolvability pass (is every
-   referenced name defined? does the env var / file exist?) distinct from
-   evaluation, plus per-node memoization of evaluated expressions. Maps to a
-   richer `has`/`check` than Milestone 1's `has`, and a caching layer once
-   evaluation is non-trivial.
+   referenced name defined? does the env var exist?) distinct from evaluation,
+   plus per-node memoization of evaluated expressions. Maps to a richer
+   `has`/`check` than today's `has`, and a caching layer once evaluation is
+   non-trivial. Deferred.
 ```

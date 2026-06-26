@@ -51,9 +51,10 @@ void install_builtins(Registry& reg) {
         const char* e = std::getenv(trim(stringify(args[0])).c_str());
         return rawast::make_string(e ? std::string(e) : std::string());
     };
-    // NOTE: $JSON{} (load a JSON file as a cached sub-folder) is deferred — it
-    // returns a sub-context, which needs the callback signature widened to the
-    // value union. Tracked for a follow-up (SPEC §4.2 / §11).
+    // NOTE: file composition is intentionally NOT an expression function (no
+    // `$JSON{}`). File I/O during evaluation is a footgun; loading a config as a
+    // sub-folder lives in the load/format layer (load_json + link/merge today, a
+    // load-time include later). See SPEC §4.2 / §7.2 / §11.
 }
 
 } // namespace
