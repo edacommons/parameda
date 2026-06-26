@@ -478,6 +478,28 @@ construction (a linked chain passes through the link's parent), which always hol
 for `load_json`-built configs; arbitrary cross-branch links would need node-id
 references — deferred.
 
+**Planned — a full-graph format via a rawast grammar.** Plain JSON tops out at
+the tree projection because it has no vocabulary for graph edges. The full graph
+(shared sub-trees, cross-branch links, merges, deletes) will serialize through a
+**JSON-derived format defined as a rawast grammar** — and this is where a rawast
+grammar genuinely pays off (unlike the expression language, §4.1): a file format
+is inherently *bidirectional* (parse *and* save), which is rawast's strength. The
+new elements map closely to YAML anchors/aliases:
+
+- **anchors + references** — `&id { … }` to label a node, `key: *id` to link
+  (cross-branch links and shared sub-trees).
+- **a merge directive with the order flag** — e.g. `<<: *defaults` /
+  `<<!: *defaults` for merge-first vs walk-up-first (§3.2).
+- **a delete marker** — a tombstone token for a key.
+- optionally **explicit node ids** to preserve sharing/branching, not just trees.
+
+rawast emits these as tagged dicts (`{type:"ref", id:…}`, `{type:"merge", …}`)
+which parameda turns into `Ref`/`Merge`/`Deleted` records on load and back on
+save — bidirectional by construction. **Plain JSON remains a readable subset** for
+tree configs (today's path), so the simple case stays simple. So the tooling
+splits cleanly: a hand-rolled parser for in-value expressions (§4.1), a rawast
+grammar for the on-disk format.
+
 ---
 
 ## 8. Implementation shape
