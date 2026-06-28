@@ -246,7 +246,9 @@ $name{ arg, arg, … }
   only `args`; `ctx` is a handle back into the calling view.
 - **Eager arguments.** Args are evaluated from the view *before* the callback is
   called, with each arg's leading/trailing *literal* whitespace trimmed at parse
-  time (template text only — never a value's content). A future special-form door
+  time (template text only — never a value's content). If any argument is
+  Undefined, the call short-circuits to Undefined and the callback is skipped
+  (§5.1). A future special-form door
   — a callback opting into raw, unevaluated arg ASTs — is what a lazy
   `$if{cond, then, else}` would need; deferred, see §9.
 - **Return.** Currently a callback returns a **data** Value. Widening the return
@@ -262,8 +264,9 @@ $name{ arg, arg, … }
 
 **Built-ins:**
 
-- `$ENV{VAR}` — environment variable, empty if unset (shipped). `ENV` is the
-  boundary case worth keeping inline: tiny and read-only.
+- `$ENV{VAR}` — environment variable; **Undefined if unset** (§5.1), distinct
+  from set-but-empty `""` (shipped). `ENV` is the boundary case worth keeping
+  inline: tiny and read-only.
 
 **Not an expression function: file composition.** An earlier plan had a
 `$JSON{path}` function loading a file as a sub-folder (from `cfg.py`). It is
@@ -360,6 +363,46 @@ eval(AST, view):
   bound on match-recursion depth. The literal fast-path keeps the common case off
   this path entirely.
 
+### 5.1 Undefined — the bottom value
+
+Resolution never throws for "unresolved." Anything that can't resolve evaluates to
+**Undefined**, a propagating bottom value (think NaN / SQL `NULL`). This unifies
+resolution and resolvability — there is **no separate `check` pass**; `has(key)`
+is just "resolves to non-Undefined."
+
+**Sources of Undefined:**
+- `${missing}` (no winner up the stream), a `Deleted` tombstone, or a dead-end
+  reference cycle (skip-and-continue with no shadowed escape, §5).
+- `$ENV{VAR}` with `VAR` unset (distinct from set-but-empty `""`).
+- a computed key that resolves to Undefined — it matches nothing.
+
+**Propagation:**
+- **String interpolation short-circuits:** if any interpolated part is Undefined,
+  the whole result is Undefined (no partial strings).
+- **Functions auto-propagate:** if any argument is Undefined, the result is
+  Undefined and the callback is *not* called. (A future *undefined-aware* opt-in
+  would let a `coalesce`/`default` see Undefined and decide.)
+- A stored/forwarded Undefined flows through `eval`.
+
+**Boundary:**
+- **Return-only.** Undefined emerges from evaluation; it is never stored —
+  `set(k, Undefined)` is rejected. Backed by rawast's `UndefinedValue`; parameda
+  exposes its **own** `Undefined` singleton (self-contained — no rawast-Python
+  dependency; see the §"other values" note below).
+- `get` returns Undefined (no exception); `has` = resolves-to-defined; the
+  evaluated snapshot / `to_dict` **omits** unresolved keys (Undefined has no JSON
+  form; raw dumps keep templates and are never Undefined).
+- **Unknown function** `$nope{}` is still an *error* (a real mistake), not
+  Undefined.
+
+**Why parameda's own singleton:** values map to native Python types (int/str/…),
+which are shared across modules for free; Undefined is the *only* value with no
+native equivalent, so it needs a sentinel. parameda mints its own (rather than
+importing rawast's) to keep its Python surface self-contained. Cost: if a project
+uses both `parameda` and `rawast` Python directly, `parameda.Undefined is
+rawast.Undefined` is False — but both are falsy/return-only/identical in behavior,
+so only a raw cross-library `is` check would notice.
+
 ---
 
 ## 6. What a read returns
@@ -369,8 +412,8 @@ eval(AST, view):
 - **Ref** → a **sub-context** (a view on the target). The engine never auto-walks
   it; the caller may query into it, at which point the target becomes the new
   view and resolution proceeds from there.
-- **Deleted / not found** → undefined (an error on `get`, falsy on a `has`-style
-  probe — exact API **OPEN**).
+- **Deleted / not found / unresolved** → **Undefined** (§5.1) — not an error.
+  `get` returns the `Undefined` sentinel; `has` is false.
 
 ---
 
@@ -384,8 +427,8 @@ ctx.delete(key)                 -> ctx'          # append a Deleted child (tombs
 ctx.link(key, target)           -> ctx'          # append a Ref child
 ctx.merge(target, merge_first)  -> ctx'          # append a keyless Merge child
 
-ctx.get(key)                    -> value         # resolve (§5); error if undefined
-ctx.has(key)                    -> bool          # resolves without raising
+ctx.get(key)                    -> value | Undefined  # resolve (§5); Undefined if unresolved (§5.1)
+ctx.has(key)                    -> bool          # resolves to a defined value (§5.1)
 ctx.raw(key)                    -> AST | None    # winning record's unevaluated value
 
 ctx.parent()                    -> ctx | None
@@ -543,7 +586,7 @@ grammar for the on-disk format.
 ```cmake
 FetchContent_Declare(rawast
     GIT_REPOSITORY https://github.com/edacommons/rawast.git
-    GIT_TAG v0.1.9           # pinned
+    GIT_TAG v0.1.10          # pinned
     GIT_SHALLOW ON)
 FetchContent_MakeAvailable(rawast)
 # target_link_libraries(parameda PUBLIC rawast::rawast)
@@ -561,7 +604,10 @@ FetchContent_MakeAvailable(rawast)
    (raw, unevaluated arg ASTs) for a `$if{…}`-style conditional — when to open that
    door (§4.2); (c) may user functions **override** a built-in name (`ENV`), or are
    built-ins reserved?
-3. `get`/`has` error/return conventions for undefined and for `Ref` results.
+3. ~~`get`/`has` conventions~~ — RESOLVED via Undefined (§5.1): `get` returns the
+   `Undefined` sentinel for unresolved (no exception) and a sub-context for `Ref`;
+   `has` = resolves-to-defined. The separate `check`/resolvability pass is
+   subsumed.
 4. ~~On-disk serialization format~~ — RESOLVED: nested JSON mirroring the folder
    structure (§7.2), via rawast's JSON parse/save. Faithful full-graph dump
    (merges, cross-branch links via node ids) remains a later extension.
@@ -622,9 +668,10 @@ Mechanisms drawn from it:
    the load/format layer — `load_json_file` + `link`/`merge` today, a load-time
    include directive in the §7.2 format later (which is where "yields a folder"
    belongs).
-3. **`check` vs `evaluate` split + memoization.** A resolvability pass (is every
-   referenced name defined? does the env var exist?) distinct from evaluation,
-   plus per-node memoization of evaluated expressions. Maps to a richer
-   `has`/`check` than today's `has`, and a caching layer once evaluation is
-   non-trivial. Deferred.
+3. **`check` vs `evaluate` split + memoization.** The *resolvability* half is now
+   handled differently — not a separate pass but the **Undefined** bottom value
+   (§5.1): `has(key)` = resolves-to-defined, and unresolved references propagate
+   Undefined. (`cfg.py` used `check`; parameda folds it into evaluation.) The
+   remaining idea worth keeping is **per-node memoization** of evaluated
+   expressions, a caching layer once evaluation is non-trivial — deferred.
 ```

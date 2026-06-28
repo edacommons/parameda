@@ -109,6 +109,41 @@ def test_json_round_trip(tmp_path):
     assert b.path("build.dir") == "/opt/b"
 
 
-def test_missing_key_raises():
-    with pytest.raises(KeyError):
-        parameda.root().get("nope")
+def test_missing_returns_undefined():
+    assert parameda.root().get("nope") is parameda.Undefined
+
+
+def test_undefined_propagates():
+    assert parameda.root().set("v", "${missing}").get("v") is parameda.Undefined
+    # string interpolation short-circuits
+    assert parameda.root().set("v", "a/${missing}/b").get("v") is parameda.Undefined
+    # through a chain
+    cfg = parameda.root().set("a", "${missing}").set("b", "${a}")
+    assert cfg.get("b") is parameda.Undefined
+
+
+def test_undefined_is_falsy():
+    assert not parameda.Undefined
+    assert repr(parameda.Undefined) == "Undefined"
+
+
+def test_env_unset_is_undefined(monkeypatch):
+    monkeypatch.delenv("PARAMEDA_NOPE_XYZ", raising=False)
+    assert parameda.root().set("v", "$ENV{PARAMEDA_NOPE_XYZ}").get("v") is parameda.Undefined
+
+
+def test_has_means_resolves_to_defined():
+    cfg = parameda.root().set("ok", 1).set("bad", "${missing}")
+    assert cfg.has("ok")
+    assert not cfg.has("bad")     # present but unresolved
+    assert not cfg.has("absent")  # not present
+
+
+def test_undefined_is_return_only():
+    with pytest.raises(ValueError):
+        parameda.root().set("x", parameda.Undefined)
+
+
+def test_to_dict_omits_unresolved():
+    cfg = parameda.root().set("ok", 1).set("bad", "${missing}")
+    assert cfg.to_dict() == {"ok": 1}

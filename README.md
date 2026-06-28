@@ -75,10 +75,15 @@ cfg = parameda.root().load_json(
 cfg.path("build.dir")   # "/opt/b"  (the build folder inherits ${root})
 cfg.to_dict()           # {"root": "/opt", "build": {"dir": "/opt/b"}}  (evaluated)
 cfg.save_json("out.json")   # raw — templates preserved for round-trip
+
+# Anything unresolved is Undefined (a propagating bottom value), not an error
+parameda.root().get("missing") is parameda.Undefined          # True
+parameda.root().set("v", "a/${missing}/b").get("v") is parameda.Undefined  # True
+parameda.root().set("v", "${missing}").has("v")               # False
 ```
 
 Also available: `$ENV{VAR}`, `\X` to escape a literal character, `delete(key)`
-tombstones, `has(key)`, and `parent()`.
+tombstones, `has(key)`, `parent()`, and the `Undefined` sentinel.
 
 ## Status
 
@@ -89,13 +94,14 @@ view-anchored, with built-in `${…}` substitution, comma-arg functions via a
 **registry** (`$ENV{}` built in, plus C++/Python-registerable functions),
 computed names (`${${x}}`), whole-string passthrough, and `super`-style
 self-reference. Plus **JSON persistence** — `load_json`/`save_json`/`to_dict`,
-where nested objects become inheriting sub-folders and templates round-trip raw.
+where nested objects become inheriting sub-folders and templates round-trip raw —
+and an **`Undefined`** bottom value: unresolved references propagate `Undefined`
+instead of raising, so `has(key)` *is* the resolvability check (no separate pass).
 
-Next up: a small standard function set and a `check`/resolvability pass. File
-composition (loading another config as a sub-folder) lives in the load/format
-layer — `load_json_file` + `link`/`merge` today, a load-time include directive
-later — not as an expression function. Open design questions are tracked in
-[`docs/SPEC.md`](docs/SPEC.md) §9.
+Next up: a small standard function set. File composition (loading another config
+as a sub-folder) lives in the load/format layer — `load_json_file` + `link`/`merge`
+today, a load-time include directive later — not as an expression function. Open
+design questions are tracked in [`docs/SPEC.md`](docs/SPEC.md) §9.
 
 ## Building
 

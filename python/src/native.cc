@@ -26,12 +26,24 @@ using parameda::RefVal;
 
 namespace {
 
+// Backing type + singleton for parameda's `Undefined` sentinel. It's parameda's
+// own (self-contained — no rawast Python dependency); every rawast
+// UndefinedValue maps to this one object so `x is parameda.Undefined` holds.
+struct UndefinedTag {};
+
+nb::handle& undefined_py() {
+    static nb::handle h;
+    return h;
+}
+
 nb::object value_to_py(const rawast::ValuePtr& v) {
     using namespace rawast;
     if (!v) return nb::none();
     switch (v->type()) {
     case ValueType::Null:
         return nb::none();
+    case ValueType::Undefined:
+        return nb::borrow(undefined_py());
     case ValueType::Bool:
         return nb::cast(std::static_pointer_cast<BoolValue>(v)->data());
     case ValueType::Int:
@@ -59,6 +71,11 @@ nb::object value_to_py(const rawast::ValuePtr& v) {
 }
 
 rawast::ValuePtr py_to_value(nb::handle o) {
+    // Undefined is return-only: it emerges from unresolved evaluation, it is
+    // never stored (§ Undefined).
+    if (o.is(undefined_py()))
+        throw nb::value_error(
+            "parameda: Undefined is a return-only sentinel; it cannot be assigned");
     if (o.is_none()) return rawast::null_value();
     // bool must precede int (Python bool is a subclass of int).
     if (nb::isinstance<nb::bool_>(o))
@@ -89,11 +106,13 @@ rawast::ValuePtr py_to_value(nb::handle o) {
 // link), or raising KeyError when undefined / deleted.
 nb::object get_object(const Context& c, const std::string& key) {
     RecordPtr w = c.lookup(key);
+    // Missing / deleted / unresolved all return Undefined — no KeyError
+    // (§ Undefined). A link returns its sub-context.
     if (!w || std::holds_alternative<DeletedVal>(w->value))
-        throw nb::key_error(key.c_str());
+        return nb::borrow(undefined_py());
     if (std::holds_alternative<RefVal>(w->value))
         return nb::cast(c.sub(std::get<RefVal>(w->value).target));
-    return value_to_py(c.eval(w));
+    return value_to_py(c.eval(w)); // value_to_py maps Undefined → the sentinel
 }
 
 std::vector<std::string> split_path(const std::string& s) {
@@ -115,6 +134,16 @@ std::vector<std::string> split_path(const std::string& s) {
 
 NB_MODULE(_native, m) {
     m.attr("__version__") = std::string(parameda::version());
+
+    // `Undefined` — a sentinel distinct from None/null, for unresolved values.
+    // One shared instance (like None) so `value is Undefined` holds. Return-only:
+    // produced by evaluation, never assignable.
+    nb::class_<UndefinedTag>(m, "UndefinedType")
+        .def("__repr__", [](const UndefinedTag&) { return "Undefined"; })
+        .def("__bool__", [](const UndefinedTag&) { return false; });
+    nb::object undefined = nb::cast(UndefinedTag{});
+    m.attr("Undefined") = undefined;
+    undefined_py() = undefined; // kept alive by the module attribute
 
     nb::class_<Context>(m, "Context")
         .def("set",
@@ -191,12 +220,10 @@ NB_MODULE(_native, m) {
                  Context cur = s;
                  for (std::size_t i = 0; i + 1 < parts.size(); ++i) {
                      RecordPtr w = cur.lookup(parts[i]);
-                     if (!w || std::holds_alternative<DeletedVal>(w->value))
-                         throw nb::key_error(parts[i].c_str());
-                     if (!std::holds_alternative<RefVal>(w->value))
-                         throw nb::value_error(
-                             ("parameda: path segment is not a link: " + parts[i])
-                                 .c_str());
+                     // An intermediate that is missing, deleted, or not a folder
+                     // makes the whole path unresolved → Undefined (§ Undefined).
+                     if (!w || !std::holds_alternative<RefVal>(w->value))
+                         return nb::borrow(undefined_py());
                      cur = cur.sub(std::get<RefVal>(w->value).target);
                  }
                  return get_object(cur, parts.back());

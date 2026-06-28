@@ -34,6 +34,10 @@ std::string stringify(const rawast::ValuePtr& v) {
     }
 }
 
+bool is_undef(const rawast::ValuePtr& v) {
+    return v && v->type() == rawast::ValueType::Undefined;
+}
+
 std::string trim(const std::string& s) {
     std::size_t a = s.find_first_not_of(" \t\n\r");
     if (a == std::string::npos) return "";
@@ -48,8 +52,9 @@ void install_builtins(Registry& reg) {
                         const Context&) -> rawast::ValuePtr {
         if (args.size() != 1)
             throw std::runtime_error("parameda: $ENV{} takes one argument");
+        // An unset variable is Undefined (distinct from set-but-empty "").
         const char* e = std::getenv(trim(stringify(args[0])).c_str());
-        return rawast::make_string(e ? std::string(e) : std::string());
+        return e ? rawast::make_string(std::string(e)) : rawast::undefined_value();
     };
     // NOTE: file composition is intentionally NOT an expression function (no
     // `$JSON{}`). File I/O during evaluation is a footgun; loading a config as a
@@ -101,17 +106,20 @@ std::optional<Context> Context::parent() const {
 
 // --- resolution ---------------------------------------------------------
 
-std::string Context::resolve_key(const Record& r) const {
+std::optional<std::string> Context::resolve_key(const Record& r) const {
     // Literal fast-path (§2/§4.4): no `$`/`\` means the key needs no parsing.
     if (r.key.find('$') == std::string::npos &&
         r.key.find('\\') == std::string::npos)
         return r.key;
     std::set<const Record*> active;
-    return stringify(eval_expr(parse_template(r.key), active));
+    rawast::ValuePtr v = eval_expr(parse_template(r.key), active);
+    if (is_undef(v)) return std::nullopt; // an unresolved key matches nothing
+    return stringify(v);
 }
 
 bool Context::key_matches(const Record& r, const std::string& key) const {
-    return resolve_key(r) == key;
+    std::optional<std::string> rk = resolve_key(r);
+    return rk.has_value() && *rk == key;
 }
 
 RecordPtr Context::lookup(const std::string& key) const {
@@ -159,8 +167,12 @@ RecordPtr Context::lookup_in(const RecordPtr& start, const std::string& key,
 }
 
 bool Context::has(const std::string& key) const {
+    // "has" now means "resolves to a defined value" — the resolvability check,
+    // unified with evaluation (§ Undefined).
     RecordPtr w = lookup(key);
-    return w && !std::holds_alternative<DeletedVal>(w->value);
+    if (!w || std::holds_alternative<DeletedVal>(w->value)) return false;
+    if (std::holds_alternative<RefVal>(w->value)) return true; // a link is defined
+    return !is_undef(eval(w));
 }
 
 // --- evaluation (view-anchored, §5) -------------------------------------
@@ -173,6 +185,7 @@ rawast::ValuePtr Context::eval(const RecordPtr& winner) const {
 
 rawast::ValuePtr Context::eval_value(const rawast::ValuePtr& v,
                                      std::set<const Record*>& active) const {
+    if (is_undef(v)) return v; // Undefined propagates
     // Only String values carry templates; everything else passes through.
     if (v && v->type() == rawast::ValueType::String)
         return eval_expr(
@@ -184,16 +197,21 @@ rawast::ValuePtr Context::eval_value(const rawast::ValuePtr& v,
 rawast::ValuePtr Context::eval_expr(const Expr& e,
                                     std::set<const Record*>& active) const {
     // Single-action template ⇒ passthrough: return the underlying value with
-    // its type intact (§4.3).
+    // its type intact (§4.3), Undefined included.
     if (e.size() == 1 && e[0].kind == Segment::Kind::Action)
         return eval_action(e[0].action, active);
 
+    // Multi-segment string build: any Undefined part poisons the whole result
+    // (§ Undefined — no partial strings).
     std::string out;
     for (const Segment& seg : e) {
-        if (seg.kind == Segment::Kind::Text)
+        if (seg.kind == Segment::Kind::Text) {
             out += seg.text;
-        else
-            out += stringify(eval_action(seg.action, active));
+        } else {
+            rawast::ValuePtr r = eval_action(seg.action, active);
+            if (is_undef(r)) return rawast::undefined_value();
+            out += stringify(r);
+        }
     }
     return rawast::make_string(std::move(out));
 }
@@ -203,19 +221,20 @@ rawast::ValuePtr Context::eval_action(const Action& a,
     if (a.name.empty()) {
         // Built-in substitution: resolve the (single) argument as a key and
         // look it up from this view, skipping records under evaluation (§5).
+        // Anything unresolved → Undefined (no exceptions, § Undefined).
         if (a.args.size() != 1)
             throw std::runtime_error(
                 "parameda: ${} substitution takes exactly one argument");
-        std::string key = trim(stringify(eval_expr(a.args[0], active)));
+        rawast::ValuePtr keyv = eval_expr(a.args[0], active);
+        if (is_undef(keyv)) return rawast::undefined_value(); // unresolved key name
+        std::string key = trim(stringify(keyv));
 
         std::set<const Record*> mv;
         RecordPtr w = lookup_in(rec_, key, mv, active);
         if (!w || std::holds_alternative<DeletedVal>(w->value))
-            throw std::runtime_error("parameda: undefined variable '${" + key +
-                                     "}'");
+            return rawast::undefined_value(); // missing / deleted / dead-end cycle
         if (std::holds_alternative<RefVal>(w->value))
-            throw std::runtime_error("parameda: cannot interpolate a link '${" +
-                                     key + "}'");
+            return rawast::undefined_value(); // a link can't interpolate as data
         const Record* wp = w.get();
         active.insert(wp);
         rawast::ValuePtr r = eval_value(std::get<DataVal>(w->value).value, active);
@@ -223,14 +242,19 @@ rawast::ValuePtr Context::eval_action(const Action& a,
         return r;
     }
 
-    // Named function: look up in the registry and call with evaluated args.
+    // Named function: look up in the registry and call with evaluated args. An
+    // unknown function is an error (a real mistake, not "unresolved"); an
+    // Undefined argument auto-propagates and the callback is skipped.
     auto it = reg_->fns.find(a.name);
     if (it == reg_->fns.end())
         throw std::runtime_error("parameda: unknown function '$" + a.name + "{}'");
     std::vector<rawast::ValuePtr> argv;
     argv.reserve(a.args.size());
-    for (const Expr& arg : a.args)
-        argv.push_back(eval_expr(arg, active));
+    for (const Expr& arg : a.args) {
+        rawast::ValuePtr av = eval_expr(arg, active);
+        if (is_undef(av)) return rawast::undefined_value();
+        argv.push_back(av);
+    }
     return it->second(argv, *this);
 }
 

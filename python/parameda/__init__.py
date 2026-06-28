@@ -13,6 +13,6 @@ child and return a new context.
 See docs/SPEC.md for the full model.
 """
 
-from ._native import Context, root, __version__
+from ._native import Context, root, Undefined, __version__
 
-__all__ = ["Context", "root", "__version__"]
+__all__ = ["Context", "root", "Undefined", "__version__"]

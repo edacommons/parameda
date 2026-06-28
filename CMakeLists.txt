@@ -38,7 +38,7 @@ include(FetchContent)
 # ---------------------------------------------------------------------------
 FetchContent_Declare(rawast
     GIT_REPOSITORY https://github.com/edacommons/rawast.git
-    GIT_TAG v0.1.9
+    GIT_TAG v0.1.10
     GIT_SHALLOW ON
 )
 set(RAWAST_BUILD_TESTS OFF CACHE BOOL "" FORCE)

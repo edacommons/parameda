@@ -83,8 +83,15 @@ rawast::ValuePtr Context::dump_folder(const Record* boundary, bool evaluated) co
             out->data()[R->key] =
                 sub(target).dump_folder(R->parent.get(), evaluated);
         } else { // DataVal
-            out->data()[R->key] =
-                evaluated ? eval(R) : std::get<DataVal>(R->value).value;
+            if (evaluated) {
+                rawast::ValuePtr v = eval(R);
+                // Unresolved values are omitted from an evaluated snapshot (and
+                // Undefined has no JSON form). Raw values are never Undefined.
+                if (v && v->type() == rawast::ValueType::Undefined) continue;
+                out->data()[R->key] = v;
+            } else {
+                out->data()[R->key] = std::get<DataVal>(R->value).value;
+            }
         }
     }
     return out;

@@ -118,7 +118,7 @@ private:
     RecordPtr lookup_in(const RecordPtr& start, const std::string& key,
                         std::set<const Record*>& merge_visited,
                         const std::set<const Record*>& active) const;
-    std::string resolve_key(const Record& r) const;
+    std::optional<std::string> resolve_key(const Record& r) const; // nullopt ⇒ unresolved
     bool key_matches(const Record& r, const std::string& key) const;
 
     rawast::ValuePtr eval_value(const rawast::ValuePtr& v,

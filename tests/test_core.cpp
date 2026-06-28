@@ -25,6 +25,10 @@ std::string as_s(const rawast::ValuePtr& v) {
     return std::static_pointer_cast<rawast::StringValue>(v)->data();
 }
 
+bool is_undef(const rawast::ValuePtr& v) {
+    return v && v->type() == rawast::ValueType::Undefined;
+}
+
 } // namespace
 
 TEST_CASE("set/get and append-only immutability") {
@@ -91,11 +95,57 @@ TEST_CASE("self-reference resolves to the shadowed outer value") {
     CHECK(as_s(g(inner, "path")) == "/base:/extra"); // ${path} = inherited value
 }
 
-TEST_CASE("unresolvable cycle (no shadowed escape) is undefined") {
+TEST_CASE("unresolvable cycle (no shadowed escape) is Undefined") {
     Context c = Context::root()
                     .set("a", make_string("${b}"))
                     .set("b", make_string("${a}"));
-    CHECK_THROWS(g(c, "a")); // both skipped while active, nothing left to match
+    CHECK(is_undef(g(c, "a"))); // both skipped while active, nothing left to match
+}
+
+TEST_CASE("unresolved substitution is Undefined and propagates") {
+    Context c = Context::root().set("v", make_string("${missing}"));
+    CHECK(is_undef(g(c, "v")));
+
+    // String interpolation short-circuits: any Undefined part poisons the whole.
+    Context c2 = Context::root().set("v", make_string("a/${missing}/b"));
+    CHECK(is_undef(g(c2, "v")));
+
+    // Propagation through a chain.
+    Context c3 = Context::root()
+                     .set("a", make_string("${missing}"))
+                     .set("b", make_string("${a}"));
+    CHECK(is_undef(g(c3, "b")));
+}
+
+TEST_CASE("$ENV{unset} is Undefined; set-but-empty is empty string") {
+    Context c = Context::root().set("v", make_string("$ENV{PARAMEDA_NOPE_XYZ}"));
+    CHECK(is_undef(g(c, "v")));
+    ::setenv("PARAMEDA_EMPTY", "", 1);
+    Context c2 = Context::root().set("v", make_string("$ENV{PARAMEDA_EMPTY}"));
+    CHECK(!is_undef(g(c2, "v")));
+    CHECK(as_s(g(c2, "v")) == "");
+}
+
+TEST_CASE("function arg Undefined auto-propagates (callback skipped)") {
+    Context root = Context::root();
+    bool called = false;
+    root.register_fn("f", [&called](const std::vector<rawast::ValuePtr>&,
+                                    const Context&) -> rawast::ValuePtr {
+        called = true;
+        return rawast::make_string("x");
+    });
+    Context c = root.set("v", make_string("$f{${missing}}"));
+    CHECK(is_undef(g(c, "v")));
+    CHECK(!called); // the callback never ran
+}
+
+TEST_CASE("has() means resolves-to-defined") {
+    Context c = Context::root()
+                    .set("ok", make_int(1))
+                    .set("bad", make_string("${missing}"));
+    CHECK(c.has("ok"));
+    CHECK(!c.has("bad"));     // present but unresolved
+    CHECK(!c.has("absent")); // not present at all
 }
 
 TEST_CASE("link + dotted descend reaches another branch") {
